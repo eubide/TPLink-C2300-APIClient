@@ -23,8 +23,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 import requests
 import json
 import binascii
-import time
-import random
+import secrets
 import logging
 from Crypto.Cipher import AES
 from Crypto.Cipher import PKCS1_v1_5
@@ -33,7 +32,7 @@ from Crypto.Util.Padding import pad, unpad
 from Crypto.Hash import MD5
 from base64 import b64encode, b64decode
 
-import urllib
+import urllib.parse
 
 class LoginException(Exception):
     pass
@@ -49,13 +48,14 @@ class TPLinkClient:
         'X-Requested-With': 'XMLHttpRequest',
     }
 
-    def __init__(self, host, log_level = logging.INFO):
+    def __init__(self, host, log_level = logging.INFO, timeout = 10):
         logging.basicConfig()
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(log_level)
         self.req = requests.Session()
 
         self.host = host
+        self.timeout = timeout
         self.token = None
 
         self.rsa_key_pw = None
@@ -263,7 +263,7 @@ class TPLinkClient:
         else:
             form_data = data
 
-        r = self.req.post(url, data = form_data, headers = self.HEADERS)
+        r = self.req.post(url, data = form_data, headers = self.HEADERS, timeout = self.timeout)
 
         self.logger.debug('<Request  {}>'.format(r.url))
         self.logger.debug(r)
@@ -352,10 +352,9 @@ class TPLinkClient:
         KEY_LEN = 128 // 8
         IV_LEN = 16
 
-        ts = str(round(time.time() * 1000))
-
-        key = (ts + str(random.randint(100000000, 1000000000-1)))[:KEY_LEN]
-        iv = (ts + str(random.randint(100000000, 1000000000-1)))[:IV_LEN]
+        # the web UI also uses decimal digits only
+        key = ''.join(secrets.choice('0123456789') for _ in range(KEY_LEN))
+        iv = ''.join(secrets.choice('0123456789') for _ in range(IV_LEN))
 
         assert len(key) == 16
         assert len(iv) == 16
@@ -455,7 +454,8 @@ class TPLinkClient:
             data['confirm'] = 'true'
 
         response = self.__request(url, data, encrypt = True, is_login = True)
-        self.logger.info(response)
+        # on success data holds the stok, which grants admin access
+        self.logger.info(response if response.get('success') is False else {'success': response.get('success')})
 
         assert 'success' in response
 
