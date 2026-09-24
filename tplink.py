@@ -324,7 +324,7 @@ class TPLinkClient:
         if arg2 is not None:
             md5.update((arg1 + arg2).encode('utf8'))
         else:
-            md5.update(arg1)
+            md5.update(arg1.encode('utf8'))
 
         result = md5.hexdigest()
         assert len(result) == 32
