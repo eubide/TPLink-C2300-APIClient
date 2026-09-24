@@ -189,7 +189,6 @@ class TPLinkClient:
 
         return self.__request(url, data, encrypt = True)
 
-    # This function lists the parental control profiles with their devices and blocked websites
     def get_parental_profiles(self):
         url = self.get_url('admin/smart_network', 'patrol_owner_list')
         data = {
@@ -198,19 +197,20 @@ class TPLinkClient:
 
         return self.__request(url, data, encrypt = True)
 
-    # This function blocks a domain for every device in a parental control profile
+    # The router filters websites per profile, so this affects every device in the profile
     def block_domain(self, profile_name, domain):
-        return self.__update_website_list(profile_name, lambda websites: websites + [domain] if domain not in websites else websites)
+        domain = domain.strip().lower()
+        return self.__update_website_list(profile_name, lambda websites: websites if domain in [w.lower() for w in websites] else websites + [domain])
 
-    # This function unblocks a domain for every device in a parental control profile
     def unblock_domain(self, profile_name, domain):
-        return self.__update_website_list(profile_name, lambda websites: [w for w in websites if w != domain])
+        domain = domain.strip().lower()
+        return self.__update_website_list(profile_name, lambda websites: [w for w in websites if w.lower() != domain])
 
     def __update_website_list(self, profile_name, change):
         profiles = self.get_parental_profiles()['data']
         profile = next((p for p in profiles if p['name'] == profile_name), None)
         if profile is None:
-            return "Profile not found"
+            raise ValueError('Parental control profile not found: {}'.format(profile_name))
 
         # the router returns empty lists as {} but the web UI sends them back as []
         old = dict(profile)
@@ -222,12 +222,14 @@ class TPLinkClient:
 
         new = dict(old)
         new['website_list'] = change(old['website_list'])
+        if new['website_list'] == old['website_list']:
+            return {'success': True, 'data': profiles}
 
         url = self.get_url('admin/smart_network', 'patrol_owner_list')
         data = {
             'key': old['key'],
-            'new': urllib.parse.quote_plus(json.dumps(new, separators = (',', ':'))),
-            'old': urllib.parse.quote_plus(json.dumps(old, separators = (',', ':'))),
+            'new': urllib.parse.quote_plus(json.dumps(new, separators = (',', ':'), ensure_ascii = False)),
+            'old': urllib.parse.quote_plus(json.dumps(old, separators = (',', ':'), ensure_ascii = False)),
             'operation': 'update'
         }
 
