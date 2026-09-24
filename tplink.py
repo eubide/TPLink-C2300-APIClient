@@ -159,16 +159,15 @@ class TPLinkClient:
     def block_device(self, mac):
         url = self.get_url('admin/access_control', 'black_devices')
         device_data = {
-                "mac":mac,
+                "mac":self.__normalize_mac(mac),
                 "host":"NOT HOST"
         }
-        # data needs to be url encoded and wrapped in brackets
-        encoded_device_data = urllib.parse.quote_plus(f"[{json.dumps(device_data)}]")
         data = {
             'operation': 'block',
             'key': 'key=1', # not sure if a key is really needed
             'index': 0,
-            'data': encoded_device_data
+            # the router expects a JSON list
+            'data': f"[{json.dumps(device_data)}]"
         }
 
         return self.__request(url, data, encrypt = True)
@@ -177,25 +176,22 @@ class TPLinkClient:
     def unblock_device(self, mac):
         url = self.get_url('admin/access_control', 'black_list')
         blocked_devices = self.__check_success(self.get_black_list())
-        index = 0
-        device_found = False
-        key = 'anything'
-        # loop through the blocked devices to get the index
-        for device in blocked_devices['data']:
-            if device['mac'] == mac:
-                device_found = True
-                key = device.get('key', 'anything') # not sure if a key is really needed
-                break
-            index += 1
-        if not device_found:
-            return "Device not found in black list"
+        mac = self.__normalize_mac(mac)
+        match = next(((i, d) for i, d in enumerate(blocked_devices['data']) if self.__normalize_mac(d['mac']) == mac), None)
+        if match is None:
+            raise ValueError('Device not found in black list: {}'.format(mac))
+        index, device = match
         data = {
-            'key': key,
+            'key': device.get('key', 'anything'), # not sure if a key is really needed
             'index': str(index),
             'operation': 'remove'
         }
 
         return self.__request(url, data, encrypt = True)
+
+    def __normalize_mac(self, mac):
+        # the router stores MACs as AA-BB-CC-DD-EE-FF
+        return mac.strip().upper().replace(':', '-')
 
     def get_parental_profiles(self):
         url = self.get_url('admin/smart_network', 'patrol_owner_list')
@@ -236,8 +232,8 @@ class TPLinkClient:
         url = self.get_url('admin/smart_network', 'patrol_owner_list')
         data = {
             'key': old['key'],
-            'new': urllib.parse.quote_plus(json.dumps(new, separators = (',', ':'), ensure_ascii = False)),
-            'old': urllib.parse.quote_plus(json.dumps(old, separators = (',', ':'), ensure_ascii = False)),
+            'new': json.dumps(new, separators = (',', ':'), ensure_ascii = False),
+            'old': json.dumps(old, separators = (',', ':'), ensure_ascii = False),
             'operation': 'update'
         }
 
@@ -320,12 +316,7 @@ class TPLinkClient:
         return response
 
     def __format_body_to_encrypt(self, data):
-        # format form data into a string
-        data_arr = []
-        for attr, value in data.items():
-            data_arr.append('{}={}'.format(attr, value))
-
-        return '&'.join(data_arr)
+        return urllib.parse.urlencode(data)
 
     def __hash_pw(self, arg1, arg2 = None):
         md5 = MD5.new()

@@ -17,11 +17,11 @@ print(json.dumps(api.get_client_list(), indent = 4, sort_keys = True))
 # Print devices that are available to be blocked
 print(json.dumps(api.get_black_devices(), indent = 4, sort_keys = True))
 
-# UnBlock a device by it's MAC address
-api.unblock_device('7D-24-92-59-70-E8')
-
 # Block a device by it's MAC address
 api.block_device('7D-24-92-59-70-E8')
+
+# UnBlock a device by it's MAC address, raises ValueError if it is not blocked
+api.unblock_device('7D-24-92-59-70-E8')
 
 print("The following devices are blocked:")
 print(json.dumps(api.get_black_list(), indent = 4, sort_keys = True))
