@@ -22,6 +22,7 @@ along with this program. If not, see <http://www.gnu.org/licenses/>.
 '''
 import requests
 import json
+import re
 import binascii
 import secrets
 import logging
@@ -38,6 +39,9 @@ class LoginException(Exception):
     pass
 
 class UserConflictException(LoginException):
+    pass
+
+class ApiException(Exception):
     pass
 
 class TPLinkClient:
@@ -62,12 +66,16 @@ class TPLinkClient:
         self.rsa_key_auth = None
 
         self.md5_hash_pw = None
+        self.aes_key = None
 
     def get_url(self, endpoint, form):
         stok = self.token if self.token is not None else ''
         return 'http://{}/cgi-bin/luci/;stok={}/{}?form={}'.format(self.host, stok, endpoint, form)
 
     def connect(self, password, logout_others = False):
+        # the key requests must not carry the stok of a previous session
+        self.token = None
+
         # hash the password
         self.md5_hash_pw = self.__hash_pw('admin', password)
 
@@ -94,10 +102,10 @@ class TPLinkClient:
         if self.token is None:
             return False
 
-        success = self.__req_logout()
-        self.token = None
-
-        return success
+        try:
+            return self.__req_logout()
+        finally:
+            self.token = None
 
     def get_client_list(self):
         url = self.get_url('admin/status', 'client_status')
@@ -168,7 +176,7 @@ class TPLinkClient:
     # This function unblocks a device by MAC address
     def unblock_device(self, mac):
         url = self.get_url('admin/access_control', 'black_list')
-        blocked_devices = self.get_black_list()
+        blocked_devices = self.__check_success(self.get_black_list())
         index = 0
         device_found = False
         key = 'anything'
@@ -207,7 +215,7 @@ class TPLinkClient:
         return self.__update_website_list(profile_name, lambda websites: [w for w in websites if w.lower() != domain])
 
     def __update_website_list(self, profile_name, change):
-        profiles = self.get_parental_profiles()['data']
+        profiles = self.__check_success(self.get_parental_profiles())['data']
         profile = next((p for p in profiles if p['name'] == profile_name), None)
         if profile is None:
             raise ValueError('Parental control profile not found: {}'.format(profile_name))
@@ -240,6 +248,9 @@ class TPLinkClient:
 
     def __request(self, url, data, encrypt = False, is_login = False):
         if encrypt:
+            if self.aes_key is None:
+                raise ApiException('Not connected, call connect() first')
+
             data_str = self.__format_body_to_encrypt(data)
 
             # pad to a multiple of 16 with pkcs7
@@ -265,45 +276,48 @@ class TPLinkClient:
 
         r = self.req.post(url, data = form_data, headers = self.HEADERS, timeout = self.timeout)
 
-        self.logger.debug('<Request  {}>'.format(r.url))
+        safe_url = re.sub(r';stok=[^/]*', ';stok=<redacted>', r.url)
+        self.logger.debug('<Request  {}>'.format(safe_url))
         self.logger.debug(r)
         self.logger.debug(r.text)
 
-        assert r.text != ''
+        if r.status_code != 200 or r.text == '':
+            # an empty 403 usually means the signature was rejected or the session expired
+            raise ApiException('HTTP {} with {} body from {}'.format(r.status_code, 'empty' if r.text == '' else 'non-empty', safe_url))
 
-        if encrypt:
-            # Try to parse the json response
-            try:
-                raw_response_json = json.loads(r.text)
-                assert 'data' in raw_response_json # base64
-
-                # decode base64 string
-                encrypted_response_data = b64decode(raw_response_json['data'])
-
-                # decrypt the response using our AES key
-                aes_decryptor = self.__gen_aes_cipher(self.aes_key)
-                response = aes_decryptor.decrypt(encrypted_response_data)
-
-                # unpad using pkcs7
-                j = unpad(response, 16, 'pkcs7').decode('utf8')
-
-                return json.loads(j)
-            # Added 3/13/2023 JG
-            # If we fail to parse the json response, try parsing as a string response
-            except json.decoder.JSONDecodeError:
-                # decode base64 string
-                encrypted_response_data = b64decode(r.text)
-
-                # decrypt the response using our AES key
-                aes_decryptor = self.__gen_aes_cipher(self.aes_key)
-                response = aes_decryptor.decrypt(encrypted_response_data)
-
-                # unpad using pkcs7
-                j = unpad(response, 16, 'pkcs7').decode('utf8')
-                return j
-        # If not encrypting, just return the json response
-        else:
+        if not encrypt:
             return json.loads(r.text)
+
+        try:
+            envelope = json.loads(r.text)
+        except json.decoder.JSONDecodeError:
+            # some endpoints answer with the bare base64 ciphertext instead of {"data": ...}
+            envelope = None
+
+        if envelope is None:
+            plaintext = self.__decrypt(r.text)
+        elif 'data' in envelope:
+            plaintext = self.__decrypt(envelope['data'])
+        else:
+            # unencrypted error, e.g. {"errorcode": "timeout", "success": false} on an expired session
+            return envelope
+
+        try:
+            return json.loads(plaintext)
+        except json.decoder.JSONDecodeError:
+            return plaintext
+
+    def __decrypt(self, b64_data):
+        aes_decryptor = self.__gen_aes_cipher(self.aes_key)
+        response = aes_decryptor.decrypt(b64decode(b64_data))
+
+        return unpad(response, 16, 'pkcs7').decode('utf8')
+
+    def __check_success(self, response):
+        if not isinstance(response, dict) or response.get('success') is not True:
+            raise ApiException('Router request failed: {}'.format(response))
+
+        return response
 
     def __format_body_to_encrypt(self, data):
         # format form data into a string
@@ -501,6 +515,4 @@ class TPLinkClient:
         response = self.__request(url, data, encrypt = True)
         self.logger.info(response)
 
-        assert 'success' in response
-
-        return response['success']
+        return isinstance(response, dict) and response.get('success') is True
